@@ -21,7 +21,7 @@ static void *elzmaAlloc(void *p, size_t size) {
 static void elzmaFree(void *p, void *address) {
     struct elzma_alloc_struct * as = (struct elzma_alloc_struct *) p;
     if (as->clientFreeFunc) {
-        as->clientFreeFunc(as->clientMallocContext, address);
+        as->clientFreeFunc(as->clientFreeContext, address);
     } else {
         free(address);
     }

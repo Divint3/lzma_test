@@ -67,9 +67,12 @@ extern "C" {
 typedef enum {
     ELZMA_lzip, /**< the lzip format which includes a magic number and
                  *   CRC check */
-    ELZMA_lzma  /**< the LZMA-Alone format, originally designed by
+    ELZMA_lzma, /**< the LZMA-Alone format, originally designed by
                  *   Igor Pavlov and in widespread use due to lzmautils,
                  *   lacking both aforementioned features of lzip */
+    ELZMA_raw_lzma /**< a raw LZMA stream containing five property bytes
+                    *   followed by compressed data.  Its uncompressed size
+                    *   must be configured before decompression. */
 /* XXX: future, potentially   ,
     ELZMA_xz 
 */

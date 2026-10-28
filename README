@@ -47,6 +47,26 @@ Usage
 
 XXX: write me (and the code)
 
+Building
+
+The build system requires CMake 3.20 or newer.  See INSTALL for build,
+test, and installation instructions.
+
+Streaming OTA decompression
+
+Raw LZMA payloads that contain five property bytes followed by compressed
+data can be decoded without buffering the complete firmware:
+
+  elzma_decompress_config(handle, uncompressedSize, inputChunk, outputChunk);
+  elzma_decompress_run(handle, readCallback, readContext,
+                       flashWriteCallback, flashContext,
+                       ELZMA_raw_lzma);
+
+The input callback should seek past any OTA wrapper bytes before returning
+the raw LZMA stream.  The output callback must write each chunk before
+returning because its buffer is reused.  See test/ota_stream_test.c for a
+complete example using 1 KiB input buffers and 256-byte output writes.
+
 The Saga of LZMA File Formats, and a couple cents.
 
 As far as I can tell, there are at least four different ways to put LZMA

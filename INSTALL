@@ -1,9 +1,43 @@
-How to build (and eventually install) the easylzma library and
-bundled command line tools
+Building easylzma
+=================
 
-1. get cmake version 2.6 or greater
-2. mkdir build
-3. cd build
-4. cmake ..
-5. make
-6. build output is in build/easylzma-x.y.z/ *
+Requirements:
+
+  * CMake 3.20 or newer
+  * A C99 compiler
+  * Ninja when using the included presets
+
+Configure and build with CMake presets:
+
+  cmake --preset release
+  cmake --build --preset release-build --parallel
+  ctest --preset release-test
+
+Or use the standard CMake workflow:
+
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+  cmake --build build --parallel
+  ctest --test-dir build --output-on-failure
+
+To include a real OTA firmware in the streaming integration test:
+
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+    -DEASYLZMA_OTA_FIRMWARE=/path/to/firmware.bin
+  cmake --build build --parallel
+  ctest --test-dir build --output-on-failure -R ota-stream
+
+The command-line tools and versioned library bundle are written to:
+
+  build/easylzma-0.0.8/
+
+Install into a custom prefix:
+
+  cmake --install build/release --prefix /path/to/prefix
+
+Installed CMake packages can be consumed with:
+
+  find_package(easylzma 0.0 REQUIRED)
+  target_link_libraries(my_program PRIVATE easylzma::easylzma)
+
+Use easylzma::easylzma for the shared library and
+easylzma::easylzma_s for the static library.

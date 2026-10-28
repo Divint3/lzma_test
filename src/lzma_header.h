@@ -6,5 +6,6 @@
 /* LZMA-Alone header format gleaned from reading Igor's code */
 
 void initializeLZMAFormatHandler(struct elzma_format_handler * hand);
+void initializeRawLZMAFormatHandler(struct elzma_format_handler * hand);
 
 #endif

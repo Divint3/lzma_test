@@ -1,59 +1,122 @@
-# Written in 2009 by Lloyd Hilaiel
-#
-# License
-# 
-# All the cruft you find here is public domain.  You don't have to credit
-# anyone to use this code, but my personal request is that you mention
-# Igor Pavlov for his hard, high quality work.
-#
+set(
+    EASYLZMA_SOURCES
+    common_internal.c
+    compress.c
+    decompress.c
+    lzip_header.c
+    lzma_header.c
+    pavlov/7zBuf.c
+    pavlov/7zBuf2.c
+    pavlov/7zCrc.c
+    pavlov/7zFile.c
+    pavlov/7zStream.c
+    pavlov/Alloc.c
+    pavlov/Bcj2.c
+    pavlov/Bra.c
+    pavlov/Bra86.c
+    pavlov/BraIA64.c
+    pavlov/LzFind.c
+    pavlov/LzmaDec.c
+    pavlov/LzmaEnc.c
+    pavlov/LzmaLib.c
+)
 
-IF (WIN32)
-  ADD_DEFINITIONS(-DWIN32)
-ENDIF (WIN32)
+set(
+    EASYLZMA_INTERNAL_HEADERS
+    common_internal.h
+    lzip_header.h
+    lzma_header.h
+)
 
-FILE(GLOB SRCS pavlov/*.c *.c)
-FILE(GLOB HDRS *.h pavlov/*.h easylzma/*.h)
-FILE(GLOB PUB_HDRS easylzma/*.h)
+function(easylzma_configure_library target)
+    target_sources(
+        ${target}
+        PRIVATE
+        ${EASYLZMA_SOURCES}
+        ${EASYLZMA_INTERNAL_HEADERS}
+    )
 
-# set up some paths for outputing the usable binaries
-SET (libDir
-     ${CMAKE_CURRENT_BINARY_DIR}/../${EASYLZMA_DIST_NAME}/lib)
-SET (incDir
-     ${CMAKE_CURRENT_BINARY_DIR}/../${EASYLZMA_DIST_NAME}/include/easylzma)
+    target_compile_features(${target} PRIVATE c_std_99)
+    target_include_directories(
+        ${target}
+        PUBLIC
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    )
 
-# an include directory to allow easylzma implementation to find public
-# headers
-INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR})
+    if(WIN32)
+        target_compile_definitions(${target} PUBLIC WIN32)
+    endif()
 
-# get the built libs into the correct place
-SET(LIBRARY_OUTPUT_PATH ${libDir})
+    set_target_properties(
+        ${target}
+        PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+    )
 
-ADD_LIBRARY(easylzma_s STATIC ${SRCS} ${HDRS})
-ADD_LIBRARY(easylzma   SHARED ${SRCS} ${HDRS})
+    easylzma_enable_warnings(${target})
+endfunction()
 
-# setup shared library version numbering
-SET_TARGET_PROPERTIES(
-    easylzma PROPERTIES
-    SOVERSION ${EASYLZMA_MAJOR}
-    VERSION ${EASYLZMA_MAJOR}.${EASYLZMA_MINOR}.${EASYLZMA_MICRO})
+function(easylzma_copy_public_headers target)
+    foreach(header IN LISTS EASYLZMA_PUBLIC_HEADERS)
+        add_custom_command(
+            TARGET ${target}
+            POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${EASYLZMA_OUTPUT_INCLUDE_DIR}/easylzma"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${CMAKE_CURRENT_SOURCE_DIR}/easylzma/${header}"
+                    "${EASYLZMA_OUTPUT_INCLUDE_DIR}/easylzma/${header}"
+            VERBATIM
+        )
+    endforeach()
+endfunction()
 
-# on win32 we'll need to setup exports correctly
-SET(sharedLibCompileFlags "-DEASYLZMA_SHARED -DEASYLZMA_BUILD")
-IF (APPLE)
-  SET(sharedLibCompileFlags "${sharedLibCompileFlags} -fno-common")
-ENDIF (APPLE)
+if(EASYLZMA_BUILD_SHARED)
+    add_library(easylzma SHARED)
+    easylzma_configure_library(easylzma)
+    add_library(easylzma::easylzma ALIAS easylzma)
+    easylzma_copy_public_headers(easylzma)
 
-SET_TARGET_PROPERTIES(easylzma PROPERTIES
-                      COMPILE_FLAGS ${sharedLibCompileFlags})
+    target_compile_definitions(easylzma PRIVATE EASYLZMA_SHARED EASYLZMA_BUILD)
+    target_compile_definitions(easylzma INTERFACE $<$<PLATFORM_ID:Windows>:EASYLZMA_SHARED>)
 
-# create these output directories
-FILE(MAKE_DIRECTORY ${libDir})
-FILE(MAKE_DIRECTORY ${incDir})
+    set_target_properties(
+        easylzma
+        PROPERTIES
+        VERSION "${PROJECT_VERSION}"
+        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        ARCHIVE_OUTPUT_DIRECTORY "$<1:${EASYLZMA_OUTPUT_LIB_DIR}>"
+        LIBRARY_OUTPUT_DIRECTORY "$<1:${EASYLZMA_OUTPUT_LIB_DIR}>"
+        RUNTIME_OUTPUT_DIRECTORY "$<1:${EASYLZMA_OUTPUT_LIB_DIR}>"
+    )
 
-### copy the two required headers into our output dir as a post build step
-# copy public headers to output directory
-FOREACH (header ${PUB_HDRS})
-  # preserve relative pathing		
-  ADD_CUSTOM_COMMAND(TARGET easylzma_s POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${header} ${incDir})
-ENDFOREACH (header ${PUB_HDRS})
+    install(
+        TARGETS easylzma
+        EXPORT easylzmaTargets
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+    )
+endif()
+
+if(EASYLZMA_BUILD_STATIC)
+    add_library(easylzma_s STATIC)
+    easylzma_configure_library(easylzma_s)
+    add_library(easylzma::easylzma_s ALIAS easylzma_s)
+    easylzma_copy_public_headers(easylzma_s)
+
+    set_target_properties(
+        easylzma_s
+        PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY "$<1:${EASYLZMA_OUTPUT_LIB_DIR}>"
+    )
+
+    install(
+        TARGETS easylzma_s
+        EXPORT easylzmaTargets
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+    )
+endif()

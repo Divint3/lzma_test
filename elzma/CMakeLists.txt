@@ -1,47 +1,22 @@
-# Written in 2009 by Lloyd Hilaiel
-#
-# License
-# 
-# All the cruft you find here is public domain.  You don't have to credit
-# anyone to use this code, but my personal request is that you mention
-# Igor Pavlov for his hard, high quality work.
-#
+set(ELZMA_SOURCES elzma.c util.c)
+set(ELZMA_HEADERS util.h)
 
-IF (WIN32)
-  ADD_DEFINITIONS(-DWIN32)
-ENDIF (WIN32)
+add_executable(elzma ${ELZMA_SOURCES} ${ELZMA_HEADERS})
+add_executable(unelzma ${ELZMA_SOURCES} ${ELZMA_HEADERS})
 
-# set up some paths
-SET (binDir ${CMAKE_CURRENT_BINARY_DIR}/../${EASYLZMA_DIST_NAME}/bin)
+foreach(target IN ITEMS elzma unelzma)
+    target_link_libraries(${target} PRIVATE ${EASYLZMA_LINK_LIBRARY})
+    target_compile_features(${target} PRIVATE c_std_99)
+    easylzma_enable_warnings(${target})
 
-# create some directories
-FILE(MAKE_DIRECTORY ${binDir})
+    set_target_properties(
+        ${target}
+        PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "$<1:${EASYLZMA_OUTPUT_BIN_DIR}>"
+    )
+endforeach()
 
-SET (SRCS elzma.c util.c)
-SET (HDRS util.h)
-
-# use the library we built
-INCLUDE_DIRECTORIES(
-    ${CMAKE_CURRENT_BINARY_DIR}/../${EASYLZMA_DIST_NAME}/include
+install(
+    TARGETS elzma unelzma
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
-LINK_DIRECTORIES(
-    ${CMAKE_CURRENT_BINARY_DIR}/../${EASYLZMA_DIST_NAME}/lib
-)
-
-ADD_EXECUTABLE(elzma ${SRCS})
-
-TARGET_LINK_LIBRARIES(elzma easylzma_s)
-
-# make a hard link (or copy on win32) from unelzma to elzma
-GET_TARGET_PROPERTY(binPath elzma LOCATION)
-IF (WIN32)
-  SET(exeExt ".exe") 
-  SET(hardLinkCommand ${CMAKE_COMMAND} -E copy_if_different) 
-ELSE (WIN32)
-  SET(hardLinkCommand ln -f) 
-  SET(exeExt ) 
-ENDIF (WIN32)
-ADD_CUSTOM_COMMAND(TARGET elzma POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${binPath} ${binDir}
-      COMMAND ${hardLinkCommand} elzma${exeExt} unelzma${exeExt}
-      WORKING_DIRECTORY "${binDir}")    

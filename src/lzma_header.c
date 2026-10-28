@@ -17,6 +17,7 @@
 
 #define ELZMA_LZMA_HEADER_SIZE 13
 #define ELZMA_LZMA_PROPSBUF_SIZE 5
+#define ELZMA_RAW_LZMA_HEADER_SIZE 5
 
 /****************
   Header parsing
@@ -102,6 +103,22 @@ parseLzmaHeader(const unsigned char * hdrBuf,
 }
 
 static int
+parseRawLzmaHeader(const unsigned char * hdrBuf,
+                   struct elzma_file_header * hdr)
+{
+    if (lzmadec_header_properties(&(hdr->pb), &(hdr->lp), &(hdr->lc),
+                                  *hdrBuf) ||
+        lzmadec_header_dictionary(&(hdr->dictSize), hdrBuf + 1))
+    {
+        return 1;
+    }
+
+    hdr->isStreamed = 0;
+    hdr->uncompressedSize = 0;
+    return 0;
+}
+
+static int
 serializeLzmaHeader(unsigned char * hdrBuf,
                     const struct elzma_file_header * hdr)
 {
@@ -138,4 +155,16 @@ initializeLZMAFormatHandler(struct elzma_format_handler * hand)
     hand->serialize_header = serializeLzmaHeader;    
     hand->footer_size = 0;    
     hand->serialize_footer = NULL;
+}
+
+void
+initializeRawLZMAFormatHandler(struct elzma_format_handler * hand)
+{
+    hand->header_size = ELZMA_RAW_LZMA_HEADER_SIZE;
+    hand->init_header = initLzmaHeader;
+    hand->parse_header = parseRawLzmaHeader;
+    hand->serialize_header = serializeLzmaHeader;
+    hand->footer_size = 0;
+    hand->serialize_footer = NULL;
+    hand->parse_footer = NULL;
 }

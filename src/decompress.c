@@ -16,29 +16,75 @@
 #include "lzip_header.h"
 
 #include <string.h>
-#include <assert.h>
 
-#define ELZMA_DECOMPRESS_INPUT_BUFSIZE (1024 * 64)
-#define ELZMA_DECOMPRESS_OUTPUT_BUFSIZE (1024 * 256)
+#define ELZMA_DECOMPRESS_BUFSIZE_DEFAULT (1024 * 4)
 
 /** an opaque handle to an lzma decompressor */
 struct _elzma_decompress_handle {
-    char inbuf[ELZMA_DECOMPRESS_INPUT_BUFSIZE];
-    char outbuf[ELZMA_DECOMPRESS_OUTPUT_BUFSIZE];    
+    size_t inputBufferSize;
+    size_t outputBufferSize;
+    unsigned long long uncompressedSize;
     struct elzma_alloc_struct allocStruct;
 };
+
+static int
+readExact(elzma_read_callback inputStream, void * inputContext,
+          unsigned char * buffer, size_t size)
+{
+    size_t total = 0;
+
+    while (total < size) {
+        size_t amount = size - total;
+        if (inputStream(inputContext, buffer + total, &amount) != 0) {
+            return ELZMA_E_INPUT_ERROR;
+        }
+        if (amount == 0) {
+            return ELZMA_E_INSUFFICIENT_INPUT;
+        }
+        if (amount > size - total) {
+            return ELZMA_E_INPUT_ERROR;
+        }
+        total += amount;
+    }
+
+    return ELZMA_E_OK;
+}
 
 elzma_decompress_handle
 elzma_decompress_alloc()
 {
-    elzma_decompress_handle hand =
-        malloc(sizeof(struct _elzma_decompress_handle));
+    elzma_decompress_handle hand = malloc(sizeof(struct _elzma_decompress_handle));
+    if (hand == NULL) {
+        return NULL;
+    }
+
     memset((void *) hand, 0, sizeof(struct _elzma_decompress_handle));
+    hand->inputBufferSize = ELZMA_DECOMPRESS_BUFSIZE_DEFAULT;
+    hand->outputBufferSize = ELZMA_DECOMPRESS_BUFSIZE_DEFAULT;
     init_alloc_struct(&(hand->allocStruct), NULL, NULL, NULL, NULL);
     return hand;
 }
 
-void elzma_decompress_set_allocation_callbacks(
+int
+elzma_decompress_config(elzma_decompress_handle hand,
+                        unsigned long long uncompressedSize,
+                        size_t inputBufferSize,
+                        size_t outputBufferSize)
+{
+    if (hand == NULL) {
+        return ELZMA_E_BAD_PARAMS;
+    }
+
+    hand->uncompressedSize = uncompressedSize;
+    hand->inputBufferSize = inputBufferSize != 0
+        ? inputBufferSize : ELZMA_DECOMPRESS_BUFSIZE_DEFAULT;
+    hand->outputBufferSize = outputBufferSize != 0
+        ? outputBufferSize : ELZMA_DECOMPRESS_BUFSIZE_DEFAULT;
+    return ELZMA_E_OK;
+}
+
+void
+elzma_decompress_set_allocation_callbacks(
     elzma_decompress_handle hand,
     elzma_malloc mallocFunc, void * mallocFuncContext,
     elzma_free freeFunc, void * freeFuncContext)
@@ -50,12 +96,15 @@ void elzma_decompress_set_allocation_callbacks(
     }
 }
 
-
 void
 elzma_decompress_free(elzma_decompress_handle * hand)
 {
-    if (*hand) free(*hand);
-    *hand = NULL;
+    if (hand && *hand) {
+        free(*hand);
+    }
+    if (hand) {
+        *hand = NULL;
+    }
 }
 
 int
@@ -64,191 +113,256 @@ elzma_decompress_run(elzma_decompress_handle hand,
                      elzma_write_callback outputStream, void * outputContext,
                      elzma_file_format format)
 {
-    unsigned long long int totalRead = 0; /* total amount read from stream */
-    unsigned int crc32 = CRC_INIT_VAL; /* running crc32 (lzip case) */     
+    unsigned long long totalRead = 0;
+    unsigned int crc32 = CRC_INIT_VAL;
+    unsigned char footerBuffer[12];
     CLzmaDec dec;
     unsigned int errorCode = ELZMA_E_OK;
     struct elzma_format_handler formatHandler;
     struct elzma_file_header h;
     struct elzma_file_footer f;
+    unsigned char * headerBuffer = NULL;
+    unsigned char * inputBuffer = NULL;
+    unsigned char * outputBuffer = NULL;
+    int decoderAllocated = 0;
 
-    /* switch between supported formats */ 
+    if (hand == NULL || inputStream == NULL || outputStream == NULL) {
+        return ELZMA_E_BAD_PARAMS;
+    }
+
     if (format == ELZMA_lzma) {
         initializeLZMAFormatHandler(&formatHandler);
     } else if (format == ELZMA_lzip) {
-        CrcGenerateTable();        
+        CrcGenerateTable();
         initializeLZIPFormatHandler(&formatHandler);
+    } else if (format == ELZMA_raw_lzma) {
+        if (hand->uncompressedSize == 0) {
+            return ELZMA_E_BAD_PARAMS;
+        }
+        initializeRawLZMAFormatHandler(&formatHandler);
     } else {
-        return ELZMA_E_BAD_PARAMS;        
+        return ELZMA_E_BAD_PARAMS;
     }
 
-    /* initialize footer */
     f.crc32 = 0;
     f.uncompressedSize = 0;
-    
-    /* initialize decoder memory */
+    formatHandler.init_header(&h);
+    memset((void *) footerBuffer, 0, sizeof(footerBuffer));
     memset((void *) &dec, 0, sizeof(dec));
     LzmaDec_Init(&dec);
 
-    /* decode the header. */
-    {
-        unsigned char * hdr = 
-            hand->allocStruct.Alloc(&(hand->allocStruct),
-                                    formatHandler.header_size);
-
-        size_t sz = formatHandler.header_size;
-
-        formatHandler.init_header(&h);        
-
-        if (inputStream(inputContext, hdr, &sz) != 0 ||
-            sz != formatHandler.header_size)
-        {
-            hand->allocStruct.Free(&(hand->allocStruct), hdr);
-            return ELZMA_E_INPUT_ERROR;
-        }
-
-        if (0 != formatHandler.parse_header(hdr, &h)) {
-            hand->allocStruct.Free(&(hand->allocStruct), hdr);
-            return ELZMA_E_CORRUPT_HEADER;
-        }
-
-        /* the LzmaDec_Allocate call requires 5 bytes which have
-         * compression properties encoded in them.  In the case of
-         * lzip, the header format does not already contain what
-         * LzmaDec_Allocate expects, so we must craft it, silly */
-        {
-            unsigned char propsBuf[13];
-            const unsigned char * propsPtr = hdr;            
-
-            if (format == ELZMA_lzip) {
-                struct elzma_format_handler lzmaHand;
-                initializeLZMAFormatHandler(&lzmaHand);
-                lzmaHand.serialize_header(propsBuf, &h);
-                propsPtr = propsBuf;
-            }
-
-            /* now we're ready to allocate the decoder */
-            LzmaDec_Allocate(&dec, propsPtr, 5,
-                             (ISzAlloc *) &(hand->allocStruct));
-        }
-        
-        hand->allocStruct.Free(&(hand->allocStruct), hdr);
+    inputBuffer = hand->allocStruct.Alloc(&(hand->allocStruct),
+                                          hand->inputBufferSize);
+    outputBuffer = hand->allocStruct.Alloc(&(hand->allocStruct),
+                                           hand->outputBufferSize);
+    headerBuffer = hand->allocStruct.Alloc(&(hand->allocStruct),
+                                           formatHandler.header_size);
+    if (inputBuffer == NULL || outputBuffer == NULL || headerBuffer == NULL) {
+        errorCode = ELZMA_E_DECOMPRESS_ERROR;
+        goto decompressEnd;
     }
 
-    /* perform the decoding */
-    for (;;)
-    {
-        size_t dstLen = ELZMA_DECOMPRESS_OUTPUT_BUFSIZE;
-        size_t srcLen = ELZMA_DECOMPRESS_INPUT_BUFSIZE;
-        size_t amt = 0;
-        size_t bufOff = 0;
-		ELzmaStatus stat;
+    errorCode = (unsigned int) readExact(inputStream, inputContext,
+                                         headerBuffer,
+                                         formatHandler.header_size);
+    if (errorCode != ELZMA_E_OK) {
+        goto decompressEnd;
+    }
 
-        if (0 != inputStream(inputContext, hand->inbuf, &srcLen))
-        {
-            errorCode = ELZMA_E_INPUT_ERROR;
-            goto decompressEnd;                    
+    if (formatHandler.parse_header(headerBuffer, &h) != 0) {
+        errorCode = ELZMA_E_CORRUPT_HEADER;
+        goto decompressEnd;
+    }
+
+    if (format == ELZMA_raw_lzma) {
+        h.isStreamed = 0;
+        h.uncompressedSize = hand->uncompressedSize;
+    }
+
+    {
+        unsigned char propsBuffer[13];
+        const unsigned char * properties = headerBuffer;
+
+        if (format == ELZMA_lzip) {
+            struct elzma_format_handler lzmaHandler;
+            initializeLZMAFormatHandler(&lzmaHandler);
+            lzmaHandler.serialize_header(propsBuffer, &h);
+            properties = propsBuffer;
         }
 
-        /* handle the case where the input prematurely finishes */
-        if (srcLen == 0) {
-            errorCode = ELZMA_E_INSUFFICIENT_INPUT;
+        if (LzmaDec_Allocate(&dec, properties, 5,
+                             (ISzAlloc *) &(hand->allocStruct)) != SZ_OK) {
+            errorCode = ELZMA_E_DECOMPRESS_ERROR;
             goto decompressEnd;
         }
-        
-        amt = srcLen;
+        decoderAllocated = 1;
+    }
 
-        /* handle the case where a single read buffer of compressed bytes
-         * will translate into multiple buffers of uncompressed bytes,
-         * with this inner loop */
-        stat = LZMA_STATUS_NOT_SPECIFIED;
+    {
+        size_t inputSize = 0;
+        size_t inputOffset = 0;
 
-        while (bufOff < srcLen) {
-            SRes r = LzmaDec_DecodeToBuf(&dec, (Byte *) hand->outbuf, &dstLen,
-                                         ((Byte *) hand->inbuf + bufOff), &amt,
-                                         LZMA_FINISH_ANY, &stat);
+        for (;;) {
+            size_t outputSize;
+            size_t inputAmount;
+            size_t compressedAmount;
+            ELzmaStatus status = LZMA_STATUS_NOT_SPECIFIED;
 
-            /* XXX deal with result code more granularly*/
-            if (r != SZ_OK) {
-                errorCode = ELZMA_E_DECOMPRESS_ERROR;
-                goto decompressEnd;
+            if (!h.isStreamed) {
+                if (totalRead > h.uncompressedSize) {
+                    errorCode = ELZMA_E_SIZE_MISMATCH;
+                    break;
+                }
+                if (totalRead == h.uncompressedSize) {
+                    break;
+                }
             }
-            
-            /* write what we've read */
+
+            if (inputOffset >= inputSize) {
+                inputSize = hand->inputBufferSize;
+                if (inputStream(inputContext, inputBuffer, &inputSize) != 0) {
+                    errorCode = ELZMA_E_INPUT_ERROR;
+                    break;
+                }
+                if (inputSize == 0) {
+                    errorCode = ELZMA_E_INSUFFICIENT_INPUT;
+                    break;
+                }
+                if (inputSize > hand->inputBufferSize) {
+                    errorCode = ELZMA_E_INPUT_ERROR;
+                    break;
+                }
+                inputOffset = 0;
+            }
+
+            outputSize = hand->outputBufferSize;
+
+            compressedAmount = inputSize - inputOffset;
+            inputAmount = compressedAmount;
+
+            if (LzmaDec_DecodeToBuf(
+                    &dec, (Byte *) outputBuffer, &outputSize,
+                    (Byte *) inputBuffer + inputOffset, &inputAmount,
+                    LZMA_FINISH_ANY, &status) != SZ_OK)
             {
-                size_t wt;
-                
-                /* if decoding lzip, update our crc32 value */
-                if (format == ELZMA_lzip && dstLen > 0) {
-                    crc32 = CrcUpdate(crc32, hand->outbuf, dstLen);
+                errorCode = ELZMA_E_DECOMPRESS_ERROR;
+                break;
+            }
 
+            inputOffset += inputAmount;
+
+            if (!h.isStreamed &&
+                outputSize > h.uncompressedSize - totalRead)
+            {
+                errorCode = ELZMA_E_SIZE_MISMATCH;
+                break;
+            }
+
+            totalRead += outputSize;
+
+            if (outputSize > 0) {
+                size_t written;
+
+                if (format == ELZMA_lzip) {
+                    crc32 = CrcUpdate(crc32, outputBuffer, outputSize);
                 }
-                totalRead += dstLen;
-                
-                wt = outputStream(outputContext, hand->outbuf, dstLen);
-                if (wt != dstLen) {
+
+                written = outputStream(outputContext, outputBuffer, outputSize);
+                if (written != outputSize) {
                     errorCode = ELZMA_E_OUTPUT_ERROR;
-                    goto decompressEnd;                    
+                    break;
                 }
             }
-            
-            /* do we have more data on the input buffer? */
-            bufOff += amt;
-            assert( bufOff <= srcLen );
-            if (bufOff >= srcLen) break;
-            amt = srcLen - bufOff;
 
-            /* with lzip, we will have the footer left on the buffer! */
-            if (stat == LZMA_STATUS_FINISHED_WITH_MARK) {
+            if (!h.isStreamed && totalRead > h.uncompressedSize) {
+                errorCode = ELZMA_E_SIZE_MISMATCH;
+                break;
+            }
+
+            if (status == LZMA_STATUS_FINISHED_WITH_MARK) {
+                if (formatHandler.footer_size > 0) {
+                    size_t footerOffset = 0;
+
+                    while (footerOffset < formatHandler.footer_size) {
+                        size_t available = inputSize - inputOffset;
+                        size_t amount;
+
+                        if (available == 0) {
+                            inputSize = hand->inputBufferSize;
+                            if (inputStream(inputContext, inputBuffer,
+                                            &inputSize) != 0)
+                            {
+                                errorCode = ELZMA_E_INPUT_ERROR;
+                                break;
+                            }
+                            if (inputSize == 0) {
+                                errorCode = ELZMA_E_INSUFFICIENT_INPUT;
+                                break;
+                            }
+                            if (inputSize > hand->inputBufferSize) {
+                                errorCode = ELZMA_E_INPUT_ERROR;
+                                break;
+                            }
+                            inputOffset = 0;
+                            available = inputSize;
+                        }
+
+                        amount = formatHandler.footer_size - footerOffset;
+                        if (amount > available) {
+                            amount = available;
+                        }
+                        memcpy(footerBuffer + footerOffset,
+                               inputBuffer + inputOffset, amount);
+                        footerOffset += amount;
+                        inputOffset += amount;
+                    }
+
+                    if (errorCode != ELZMA_E_OK) {
+                        break;
+                    }
+                    if (formatHandler.parse_footer == NULL ||
+                        formatHandler.parse_footer(footerBuffer, &f) != 0)
+                    {
+                        errorCode = ELZMA_E_CORRUPT_HEADER;
+                        break;
+                    }
+                }
+                break;
+            }
+
+            if (inputAmount == 0 && outputSize == 0) {
+                errorCode = ELZMA_E_DECOMPRESS_ERROR;
                 break;
             }
         }
+    }
 
-        /* now check status */
-        if (stat == LZMA_STATUS_FINISHED_WITH_MARK) {
-            /* read a footer if one is expected and
-             * present */ 
-            if (formatHandler.footer_size > 0 &&
-                amt >= formatHandler.footer_size &&
-                formatHandler.parse_footer != NULL)
-            {
-                formatHandler.parse_footer(
-                    (unsigned char *) hand->inbuf + bufOff, &f);
+    if (errorCode == ELZMA_E_OK) {
+        if (formatHandler.footer_size > 0) {
+            crc32 ^= 0xFFFFFFFF;
+            if (f.crc32 != crc32) {
+                errorCode = ELZMA_E_CRC32_MISMATCH;
+            } else if (f.uncompressedSize != totalRead) {
+                errorCode = ELZMA_E_SIZE_MISMATCH;
             }
-
-            break;
-        }
-        /* for LZMA utils,  we don't always have a finished mark */
-        if (!h.isStreamed && totalRead >= h.uncompressedSize) {
-            break;
-        }
-    }
-
-    /* finish the calculated crc32 */
-    crc32 ^= 0xFFFFFFFF;
-
-    /* if we have a footer, check that the calculated crc32 matches
-     * the encoded crc32, and that the sizes match */
-    if (formatHandler.footer_size)
-    {
-        if (f.crc32 != crc32) {
-            errorCode = ELZMA_E_CRC32_MISMATCH;
-        } else if (f.uncompressedSize != totalRead) {
-            errorCode = ELZMA_E_SIZE_MISMATCH;            
-        }
-    }
-    else if (!h.isStreamed)
-    {
-        /* if the format does not support a footer and has an uncompressed
-         * size in the header, let's compare that with how much we actually
-         * read */
-        if (h.uncompressedSize != totalRead) {
+        } else if (!h.isStreamed && h.uncompressedSize != totalRead) {
             errorCode = ELZMA_E_SIZE_MISMATCH;
         }
     }
 
-  decompressEnd:
-    LzmaDec_Free(&dec, (ISzAlloc *) &(hand->allocStruct));
+decompressEnd:
+    if (decoderAllocated) {
+        LzmaDec_Free(&dec, (ISzAlloc *) &(hand->allocStruct));
+    }
+    if (headerBuffer != NULL) {
+        hand->allocStruct.Free(&(hand->allocStruct), headerBuffer);
+    }
+    if (inputBuffer != NULL) {
+        hand->allocStruct.Free(&(hand->allocStruct), inputBuffer);
+    }
+    if (outputBuffer != NULL) {
+        hand->allocStruct.Free(&(hand->allocStruct), outputBuffer);
+    }
 
-    return errorCode;
+    return (int) errorCode;
 }

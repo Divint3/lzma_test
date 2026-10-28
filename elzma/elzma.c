@@ -425,9 +425,16 @@ doDecompress(int argc, char ** argv)
         return 1;
     }
 
-    ofname = malloc(strlen(ifname) - strlen(ext));
-    ofname[0] = 0;
-    strncat(ofname, ifname, strlen(ifname) - strlen(ext));
+    {
+        size_t outputNameLength = strlen(ifname) - strlen(ext);
+        ofname = malloc(outputNameLength + 1);
+        if (ofname == NULL) {
+            fprintf(stderr, "couldn't allocate output file name\n");
+            return 1;
+        }
+        memcpy(ofname, ifname, outputNameLength);
+        ofname[outputNameLength] = '\0';
+    }
 
     /* now attempt to open input and ouput files */
     /* XXX: stdin/stdout support */

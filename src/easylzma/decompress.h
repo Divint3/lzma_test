@@ -28,6 +28,24 @@ typedef struct _elzma_decompress_handle * elzma_decompress_handle;
 elzma_decompress_handle EASYLZMA_API elzma_decompress_alloc();
 
 /**
+ * Configure streaming decompression.
+ *
+ * uncompressedSize is required for ELZMA_raw_lzma because raw LZMA streams
+ * do not necessarily include an end marker or an uncompressed size.  It is
+ * ignored for ELZMA_lzma and ELZMA_lzip.
+ *
+ * inputBufferSize and outputBufferSize control the maximum amount of
+ * compressed and decompressed data held in RAM at once.  A value of zero
+ * selects the 4096-byte default.  Decompressed data is passed to the output
+ * callback immediately and is not retained by the decoder.
+ */
+int EASYLZMA_API elzma_decompress_config(
+    elzma_decompress_handle hand,
+    unsigned long long uncompressedSize,
+    size_t inputBufferSize,
+    size_t outputBufferSize);
+
+/**
  * set allocation routines (optional, if not called malloc & free will
  * be used) 
  */ 
@@ -43,6 +61,10 @@ void EASYLZMA_API elzma_decompress_free(elzma_decompress_handle * hand);
 
 /**
  * Perform decompression
+ *
+ * The output callback should persist each chunk before returning, for
+ * example by writing it directly to flash.  Buffers passed to the callback
+ * are reused after the callback returns.
  *
  * XXX: should the library automatically detect format by reading stream?
  *      currently it's based on data external to stream (such as extension
